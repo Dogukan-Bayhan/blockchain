@@ -1,0 +1,12 @@
+WAL (write-ahead log)
+snapshotting
+crash recovery
+state replay
+peer discovery
+gossip protocol
+chain reorg
+merkle proofs
+pruning
+persistent mempool
+concurrent validation
+async networking
