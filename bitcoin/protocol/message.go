@@ -28,7 +28,7 @@ type VersionPayload struct {
 	BestHeight int    `json:"best_height"`
 }
 
-type Pingpayload struct {
+type PingPayload struct {
 	Nonce int64 `json:"nonce"`
 }
 

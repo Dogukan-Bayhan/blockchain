@@ -14,15 +14,29 @@ import (
 var cache map[string]*block.Blockchain = make(map[string]*block.Blockchain)
 
 type BlockchainServer struct {
-	port uint16
+	port      uint16
+	p2pAddr   string
+	bootstrap string
 }
 
-func NewBlockchainServer(port uint16) *BlockchainServer {
-	return &BlockchainServer{port}
+func NewBlockchainServer(port uint16, p2pAddr string, bootstrap string) *BlockchainServer {
+	return &BlockchainServer{
+		port:      port,
+		p2pAddr:   p2pAddr,
+		bootstrap: bootstrap,
+	}
 }
 
 func (bcs *BlockchainServer) Port() uint16 {
 	return bcs.port
+}
+
+func (bcs *BlockchainServer) P2PAddr() string {
+	return bcs.p2pAddr
+}
+
+func (bcs *BlockchainServer) Bootstrap() string {
+	return bcs.bootstrap
 }
 
 func (bcs *BlockchainServer) GetBlockchain() *block.Blockchain {
@@ -166,6 +180,8 @@ func (bcs *BlockchainServer) Amount(w http.ResponseWriter, req *http.Request) {
 }
 
 func (bcs *BlockchainServer) Run() {
+	bcs.StartNetwork()
+
 	http.HandleFunc("/", bcs.GetChain)
 	http.HandleFunc("/transactions", bcs.Transactions)
 	http.HandleFunc("/mine", bcs.Mine)
