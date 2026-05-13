@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,7 @@ const (
 	MINING_DIFFICULTY = 3
 	MINING_SENDER     = "THE BLOCKCHAIN"
 	MINING_REWARD     = 1.0
+	MINING_TIMER_SEC  = 20
 )
 
 type Block struct {
@@ -44,7 +46,11 @@ func (b *Block) Print() {
 }
 
 func (b *Block) Hash() [32]byte {
-	m, _ := json.Marshal(b)
+	m, err := json.Marshal(b)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		return [32]byte{}
+	}
 
 	return sha256.Sum256(m)
 }
@@ -53,12 +59,12 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Timestamp    int64          `json:"timestamp"`
 		Nonce        int            `json:"nonce"`
-		PreviousHash [32]byte       `json:"previous_hash"`
+		PreviousHash string         `json:"previous_hash"`
 		Transactions []*Transaction `json:"transactions"`
 	}{
 		Timestamp:    b.timestamp,
 		Nonce:        b.nonce,
-		PreviousHash: b.previousHash,
+		PreviousHash: fmt.Sprintf("%x", b.previousHash),
 		Transactions: b.transactions,
 	})
 }
@@ -67,14 +73,29 @@ type Blockchain struct {
 	transactionPool  []*Transaction
 	chain            []*Block
 	blockchainAddres string
+	port             uint16
+	mux              sync.Mutex
 }
 
-func NewBlockchain(blockchainAddress string) *Blockchain {
+func NewBlockchain(blockchainAddress string, port uint16) *Blockchain {
 	b := &Block{}
 	bc := new(Blockchain)
 	bc.blockchainAddres = blockchainAddress
 	bc.CreateBlock(0, b.Hash())
+	bc.port = port
 	return bc
+}
+
+func (bc *Blockchain) TransactionPool() []*Transaction {
+	return bc.transactionPool
+}
+
+func (bc *Blockchain) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Blocks []*Block `json:"chains"`
+	}{
+		Blocks: bc.chain,
+	})
 }
 
 func (bc *Blockchain) CreateBlock(nonce int, previousHash [32]byte) *Block {
@@ -95,6 +116,16 @@ func (bc *Blockchain) Print() {
 	}
 
 	fmt.Printf("%s\n", strings.Repeat("*", 25))
+}
+
+func (bc *Blockchain) CreateTransaction(sender string, recipient string, value float32,
+	senderPublicKey *ecdsa.PublicKey, s *utils.Signature) bool {
+	isTransacted := bc.AddTransaction(sender, recipient, value, senderPublicKey, s)
+
+	// TODO
+	// Sync
+
+	return isTransacted
 }
 
 func (bc *Blockchain) AddTransaction(sender string, recipient string, value float32,
@@ -122,7 +153,15 @@ func (bc *Blockchain) AddTransaction(sender string, recipient string, value floa
 
 func (bc *Blockchain) VerifyTransactionSignature(
 	senderPublicKey *ecdsa.PublicKey, s *utils.Signature, t *Transaction) bool {
-	m, _ := json.Marshal(t)
+	if senderPublicKey == nil || s == nil || t == nil {
+		log.Println("Error: invalid transaction signature input")
+		return false
+	}
+	m, err := json.Marshal(t)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		return false
+	}
 	h := sha256.Sum256([]byte(m))
 	return ecdsa.Verify(senderPublicKey, h[:], s.R, s.S)
 }
@@ -157,12 +196,24 @@ func (bc *Blockchain) ProofOfWork() int {
 }
 
 func (bc *Blockchain) Mining() bool {
+	bc.mux.Lock()
+	defer bc.mux.Unlock()
+
+	if len(bc.transactionPool) == 0 {
+		return false
+	}
+
 	bc.AddTransaction(MINING_SENDER, bc.blockchainAddres, MINING_REWARD, nil, nil)
 	nonce := bc.ProofOfWork()
 	previousHash := bc.LastBlock().Hash()
 	bc.CreateBlock(nonce, previousHash)
 	log.Println("action=mining, status=success")
 	return true
+}
+
+func (bc *Blockchain) StartMining() {
+	bc.Mining()
+	_ = time.AfterFunc(time.Second*MINING_TIMER_SEC, bc.StartMining)
 }
 
 func (bc *Blockchain) CalculateTotalAmount(blockchainAddress string) float32 {
@@ -209,5 +260,36 @@ func (t *Transaction) MarshalJSON() ([]byte, error) {
 		Sender:    t.senderBlockchainAddress,
 		Recipient: t.recipientBlockchainAddress,
 		Value:     t.value,
+	})
+}
+
+type TransactionRequest struct {
+	SenderBlockchainAddress    *string  `json:"sender_blockchain_address"`
+	RecipientBlockchainAddress *string  `json:"recipient_blockchain_address"`
+	SenderPublicKey            *string  `json:"sender_public_key"`
+	Value                      *float32 `json:"value"`
+	Signature                  *string  `json:"signature"`
+}
+
+func (tr *TransactionRequest) Validate() bool {
+	if tr.SenderBlockchainAddress == nil ||
+		tr.RecipientBlockchainAddress == nil ||
+		tr.SenderPublicKey == nil ||
+		tr.Value == nil ||
+		tr.Signature == nil {
+		return false
+	}
+	return true
+}
+
+type AmountResponse struct {
+	Amount float32 `json:"amount"`
+}
+
+func (ar *AmountResponse) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Amount float32 `json:"amount"`
+	}{
+		Amount: ar.Amount,
 	})
 }
