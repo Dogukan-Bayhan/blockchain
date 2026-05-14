@@ -1,36 +1,54 @@
 package network
 
 import (
+	"context"
 	"log"
 	"net"
 	"sync"
 	"time"
 )
 
+// Config contains the local node identity and bootstrap settings.
 type Config struct {
 	NodeID    string
 	P2PAddr   string
 	Bootstrap string
 }
 
+// Manager listens for peers, dials bootstrap peers, and tracks active peers.
 type Manager struct {
 	nodeID    string
 	p2pAddr   string
 	bootstrap string
 
-	peers map[string]*Peer
-	mu    sync.RWMutex
+	listener net.Listener
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	peers      map[string]*Peer
+	knownPeers map[string]time.Time
+	dialing    map[string]bool
+	mu         sync.RWMutex
 }
 
+// NewManager creates a manager with an empty active-peer set.
 func NewManager(config Config) *Manager {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &Manager{
-		nodeID:    config.NodeID,
-		p2pAddr:   config.P2PAddr,
-		bootstrap: config.Bootstrap,
-		peers:     make(map[string]*Peer),
+		nodeID:     config.NodeID,
+		p2pAddr:    config.P2PAddr,
+		bootstrap:  config.Bootstrap,
+		peers:      make(map[string]*Peer),
+		knownPeers: make(map[string]time.Time),
+		dialing:    make(map[string]bool),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
+// Start begins listening for inbound peers and optionally dials the bootstrap peer.
 func (m *Manager) Start() {
 	listener, err := net.Listen("tcp", m.p2pAddr)
 	if err != nil {
@@ -39,22 +57,32 @@ func (m *Manager) Start() {
 	}
 	defer listener.Close()
 
+	m.listener = listener
+
 	log.Printf("network: listening on %s", m.p2pAddr)
 
 	if m.bootstrap != "" {
 		go m.dialBootstrap()
 	}
 	go m.logPeersPeriodically()
+	go m.discoverAddrsPeriodically()
+	go m.connectKnownPeersPeriodically()
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			select {
+			case <-m.ctx.Done():
+				log.Printf("network: listener stopped")
+				return
+			default:
+			}
 			log.Printf("network: accept error: %v", err)
 			continue
 		}
 
 		log.Printf("network: inbound peer connected from %s", conn.RemoteAddr().String())
-		peer := NewPeer(conn, false, m.nodeID, m.p2pAddr)
+		peer := NewPeer(conn, false, m.nodeID, m.p2pAddr, m)
 		m.addPeer(peer)
 		go func() {
 			defer m.removePeer(peer.Addr())
@@ -63,77 +91,26 @@ func (m *Manager) Start() {
 	}
 }
 
-func (m *Manager) dialBootstrap() {
-	conn, err := net.Dial("tcp", m.bootstrap)
-	if err != nil {
-		log.Printf("network: bootstrap dial error %s: %v", m.bootstrap, err)
-		return
+// Stop cancels background work, closes the listener, and disconnects peers.
+func (m *Manager) Stop() {
+	m.cancel()
+
+	if m.listener != nil {
+		if err := m.listener.Close(); err != nil {
+			log.Printf("network: listener close error: %v", err)
+		}
 	}
 
-	log.Printf("network: connected to bootstrap peer %s", m.bootstrap)
-	peer := NewPeer(conn, true, m.nodeID, m.p2pAddr)
-	m.addPeer(peer)
-	go func() {
-		defer m.removePeer(peer.Addr())
-		peer.Run()
-	}()
-}
-
-func (m *Manager) addPeer(peer *Peer) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.peers[peer.Addr()] = peer
-	log.Printf("network: peer added addr=%s total_peers=%d", peer.Addr(), len(m.peers))
-}
-
-func (m *Manager) removePeer(addr string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	delete(m.peers, addr)
-	log.Printf("network: peer removed addr=%s total_peers=%d", addr, len(m.peers))
-}
-
-func (m *Manager) PeerCount() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	return len(m.peers)
-}
-
-func (m *Manager) Peers() []PeerInfo {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	peers := make([]PeerInfo, 0, len(m.peers))
+	peers := make([]*Peer, 0, len(m.peers))
 	for _, peer := range m.peers {
-		peers = append(peers, peer.Info())
+		peers = append(peers, peer)
 	}
-	return peers
-}
+	m.mu.Unlock()
 
-func (m *Manager) LogPeers() {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if len(m.peers) == 0 {
-		log.Printf("network: peers empty")
-		return
-	}
-
-	for _, peer := range m.peers {
-		info := peer.Info()
-		log.Printf("network: peer addr=%s outbound=%t handshake_complete=%t",
-			info.Addr, info.Outbound, info.HandshakeComplete)
-	}
-}
-
-func (m *Manager) logPeersPeriodically() {
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		m.LogPeers()
+	for _, peer := range peers {
+		if err := peer.Close(); err != nil {
+			log.Printf("network: peer close error addr=%s: %v", peer.Addr(), err)
+		}
 	}
 }

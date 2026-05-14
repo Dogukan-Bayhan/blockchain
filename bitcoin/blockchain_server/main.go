@@ -5,10 +5,12 @@ import (
 	"log"
 )
 
+// init configures the blockchain server log prefix.
 func init() {
 	log.SetPrefix("Blockchain: ")
 }
 
+// main parses server flags and starts the blockchain HTTP/P2P process.
 func main() {
 	port := flag.Uint("port", 5005, "HTTP port")
 	p2pAddr := flag.String("p2p", ":6005", "P2P listen address")

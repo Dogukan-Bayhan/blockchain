@@ -15,12 +15,14 @@ import (
 	"golang.org/x/crypto/ripemd160"
 )
 
+// Wallet owns an ECDSA key pair and its derived blockchain address.
 type Wallet struct {
 	privateKey        *ecdsa.PrivateKey
 	publicKey         *ecdsa.PublicKey
 	blockchainAddress string
 }
 
+// NewWallet generates a key pair and derives a Base58Check-style address.
 func NewWallet() *Wallet {
 	w := new(Wallet)
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -71,26 +73,32 @@ func NewWallet() *Wallet {
 	return w
 }
 
+// PrivateKey returns the wallet's ECDSA private key.
 func (w *Wallet) PrivateKey() *ecdsa.PrivateKey {
 	return w.privateKey
 }
 
+// PrivateKeyStr returns the private key scalar as a hexadecimal string.
 func (w *Wallet) PrivateKeyStr() string {
 	return fmt.Sprintf("%x", w.privateKey.D.Bytes())
 }
 
+// PublicKey returns the wallet's ECDSA public key.
 func (w *Wallet) PublicKey() *ecdsa.PublicKey {
 	return w.publicKey
 }
 
+// PublicKeyStr returns the public key coordinates as a fixed-width hex string.
 func (w *Wallet) PublicKeyStr() string {
 	return fmt.Sprintf("%064x%064x", w.publicKey.X.Bytes(), w.publicKey.Y.Bytes())
 }
 
+// BlockchainAddress returns the wallet's derived address.
 func (w *Wallet) BlockchainAddress() string {
 	return w.blockchainAddress
 }
 
+// MarshalJSON serializes wallet credentials for the wallet API response.
 func (w *Wallet) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		PrivateKey        string `json:"private_key"`
@@ -103,6 +111,7 @@ func (w *Wallet) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// Transaction is a wallet-side transaction prepared for signing.
 type Transaction struct {
 	senderPrivateKey           *ecdsa.PrivateKey
 	senderPublicKey            *ecdsa.PublicKey
@@ -111,11 +120,13 @@ type Transaction struct {
 	value                      float32
 }
 
+// NewTransaction creates a wallet transaction ready for signature generation.
 func NewTransaction(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey,
 	sender string, recipient string, value float32) *Transaction {
 	return &Transaction{privateKey, publicKey, sender, recipient, value}
 }
 
+// GenerateSignature signs the JSON representation of the transaction.
 func (t *Transaction) GenerateSignature() *utils.Signature {
 	m, err := json.Marshal(t)
 	if err != nil {
@@ -131,6 +142,7 @@ func (t *Transaction) GenerateSignature() *utils.Signature {
 	return &utils.Signature{r, s}
 }
 
+// MarshalJSON serializes the fields that are signed and submitted to the chain.
 func (t *Transaction) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Sender    string  `json:"sender_blockchain_address"`
@@ -143,6 +155,7 @@ func (t *Transaction) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// TransactionRequest is the wallet server payload for creating a signed transfer.
 type TransactionRequest struct {
 	SenderPrivateKey           *string `json:"sender_private_key"`
 	SenderBlockchainAddress    *string `json:"sender_blockchain_address"`
@@ -151,6 +164,7 @@ type TransactionRequest struct {
 	Value                      *string `json:"value"`
 }
 
+// Validate reports whether all required wallet transaction fields are present.
 func (tr *TransactionRequest) Validate() bool {
 	if tr.SenderPrivateKey == nil ||
 		tr.SenderBlockchainAddress == nil ||

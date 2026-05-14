@@ -2,20 +2,26 @@ package network
 
 import (
 	"bitcoin/protocol"
-	"encoding/json"
-	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
+// Peer owns one TCP connection to another blockchain node.
 type Peer struct {
+	manager *Manager
+
 	conn     net.Conn
 	codec    *protocol.Codec
 	outbound bool
+	writeMu  sync.Mutex
 
 	nodeID  string
 	p2pAddr string
+
+	remoteNodeID  string
+	remoteP2PAddr string
 
 	handshakeDone   bool
 	versionSent     bool
@@ -24,14 +30,19 @@ type Peer struct {
 	verackReceived  bool
 }
 
+// PeerInfo is a stable snapshot of peer state for logs and APIs.
 type PeerInfo struct {
 	Addr              string `json:"addr"`
+	P2PAddr           string `json:"p2p_addr"`
+	NodeID            string `json:"node_id"`
 	Outbound          bool   `json:"outbound"`
 	HandshakeComplete bool   `json:"handshake_complete"`
 }
 
-func NewPeer(conn net.Conn, outbound bool, nodeID string, p2pAddr string) *Peer {
+// NewPeer creates a peer wrapper around an accepted or dialed TCP connection.
+func NewPeer(conn net.Conn, outbound bool, nodeID string, p2pAddr string, manager *Manager) *Peer {
 	return &Peer{
+		manager:  manager,
 		conn:     conn,
 		codec:    protocol.NewCodec(conn),
 		outbound: outbound,
@@ -40,18 +51,31 @@ func NewPeer(conn net.Conn, outbound bool, nodeID string, p2pAddr string) *Peer 
 	}
 }
 
+// Addr returns the active TCP connection address for this peer.
 func (p *Peer) Addr() string {
 	return p.conn.RemoteAddr().String()
 }
 
+// Info returns a snapshot of this peer's currently known metadata.
 func (p *Peer) Info() PeerInfo {
 	return PeerInfo{
 		Addr:              p.Addr(),
+		P2PAddr:           p.remoteP2PAddr,
+		NodeID:            p.remoteNodeID,
 		Outbound:          p.outbound,
 		HandshakeComplete: p.handshakeDone,
 	}
 }
 
+// AdvertisedAddr returns the peer's announced P2P address when known.
+func (p *Peer) AdvertisedAddr() string {
+	if p.remoteP2PAddr != "" {
+		return p.remoteP2PAddr
+	}
+	return p.Addr()
+}
+
+// Run performs the handshake and then processes normal protocol messages.
 func (p *Peer) Run() {
 	defer p.conn.Close()
 
@@ -85,97 +109,7 @@ func (p *Peer) Run() {
 	}
 }
 
-func (p *Peer) handleHandshakeMessage(msg protocol.Message) error {
-	switch msg.Type {
-	case protocol.MessageVersion:
-		var payload protocol.VersionPayload
-		if err := json.Unmarshal(msg.Data, &payload); err != nil {
-			return fmt.Errorf("invalid version payload: %w", err)
-		}
-
-		log.Printf("network: received version from %s at %s", payload.NodeID, payload.P2PAddr)
-		p.versionReceived = true
-
-		if !p.versionSent {
-			if err := p.sendVersion(); err != nil {
-				return fmt.Errorf("send version error: %w", err)
-			}
-			p.versionSent = true
-			log.Printf("network: sent version to %s", payload.NodeID)
-		}
-
-		if !p.verackSent {
-			if err := p.sendVerack(); err != nil {
-				return fmt.Errorf("send verack error: %w", err)
-			}
-			p.verackSent = true
-			log.Printf("network: sent verack to %s", payload.NodeID)
-		}
-
-	case protocol.MessageVerAck:
-		log.Printf("network: received verack from %s", p.conn.RemoteAddr().String())
-		p.verackReceived = true
-
-	default:
-		return fmt.Errorf("message before handshake: %s", msg.Type)
-	}
-
-	p.completeHandshakeIfReady()
-	return nil
-}
-
-func (p *Peer) completeHandshakeIfReady() {
-	if p.handshakeDone {
-		return
-	}
-
-	if p.versionSent && p.versionReceived && p.verackSent && p.verackReceived {
-		p.handshakeDone = true
-		p.conn.SetReadDeadline(time.Time{})
-		log.Printf("network: handshake complete with %s", p.conn.RemoteAddr().String())
-	}
-}
-
-func (p *Peer) handleMessage(msg protocol.Message) {
-	switch msg.Type {
-	case protocol.MessagePing:
-		// pong gonder
-
-	case protocol.MessageGetAddr:
-		// addr gonder
-
-	case protocol.MessageInv:
-		// inventory isle
-
-	case protocol.MessageTx:
-		// transaction isle
-
-	case protocol.MessageBlock:
-		// block isle
-
-	default:
-		log.Printf("network: unknown message type %q from %s", msg.Type, p.conn.RemoteAddr().String())
-	}
-}
-
-func (p *Peer) sendVersion() error {
-	payload := protocol.VersionPayload{
-		NodeID:     p.nodeID,
-		P2PAddr:    p.p2pAddr,
-		BestHeight: 0,
-	}
-
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	return p.codec.WriteMessage(protocol.Message{
-		Type: protocol.MessageVersion,
-		Data: data,
-	})
-}
-
-func (p *Peer) sendVerack() error {
-	return p.codec.WriteMessage(protocol.Message{Type: protocol.MessageVerAck})
+// Close closes the underlying TCP connection and unblocks the peer read loop.
+func (p *Peer) Close() error {
+	return p.conn.Close()
 }
