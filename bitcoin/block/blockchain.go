@@ -25,11 +25,11 @@ const (
 
 // Blockchain holds the in-memory chain and pending transaction pool.
 type Blockchain struct {
-	transactionPool  []*Transaction
+	transactionPool  map[string]*Transaction
 	chain            []*Block
 	blockchainAddres string
 	port             uint16
-	mux              sync.Mutex
+	mux              sync.RWMutex
 }
 
 // NewBlockchain initializes a blockchain with a genesis block.
@@ -37,6 +37,7 @@ func NewBlockchain(blockchainAddress string, port uint16) *Blockchain {
 	b := &Block{}
 	bc := new(Blockchain)
 	bc.blockchainAddres = blockchainAddress
+	bc.transactionPool = make(map[string]*Transaction)
 	bc.CreateBlock(0, b.Hash())
 	bc.port = port
 	return bc
@@ -44,11 +45,35 @@ func NewBlockchain(blockchainAddress string, port uint16) *Blockchain {
 
 // TransactionPool returns the current pending transactions.
 func (bc *Blockchain) TransactionPool() []*Transaction {
-	return bc.transactionPool
+	bc.mux.RLock()
+	defer bc.mux.RUnlock()
+
+	return bc.transactionPoolSnapshotLocked()
+}
+
+// HasTransaction reports whether a pending transaction exists in the pool.
+func (bc *Blockchain) HasTransaction(id string) bool {
+	bc.mux.RLock()
+	defer bc.mux.RUnlock()
+
+	_, ok := bc.transactionPool[id]
+	return ok
+}
+
+// TransactionByID returns a pending transaction by its transaction ID.
+func (bc *Blockchain) TransactionByID(id string) (*Transaction, bool) {
+	bc.mux.RLock()
+	defer bc.mux.RUnlock()
+
+	tx, ok := bc.transactionPool[id]
+	return tx, ok
 }
 
 // MarshalJSON serializes the chain for HTTP responses.
 func (bc *Blockchain) MarshalJSON() ([]byte, error) {
+	bc.mux.RLock()
+	defer bc.mux.RUnlock()
+
 	return json.Marshal(struct {
 		Blocks []*Block `json:"chains"`
 	}{
@@ -58,14 +83,25 @@ func (bc *Blockchain) MarshalJSON() ([]byte, error) {
 
 // CreateBlock appends a new block and clears the transaction pool.
 func (bc *Blockchain) CreateBlock(nonce int, previousHash [32]byte) *Block {
-	b := NewBlock(nonce, previousHash, bc.transactionPool)
+	bc.mux.Lock()
+	defer bc.mux.Unlock()
+
+	return bc.createBlockLocked(nonce, previousHash)
+}
+
+// createBlockLocked appends a block while the blockchain mutex is already held.
+func (bc *Blockchain) createBlockLocked(nonce int, previousHash [32]byte) *Block {
+	b := NewBlock(nonce, previousHash, bc.transactionPoolSnapshotLocked())
 	bc.chain = append(bc.chain, b)
-	bc.transactionPool = []*Transaction{}
+	bc.transactionPool = make(map[string]*Transaction)
 	return b
 }
 
 // LastBlock returns the current chain tip.
 func (bc *Blockchain) LastBlock() *Block {
+	bc.mux.RLock()
+	defer bc.mux.RUnlock()
+
 	return bc.chain[len(bc.chain)-1]
 }
 
@@ -96,7 +132,10 @@ func (bc *Blockchain) AddTransaction(sender string, recipient string, value floa
 	t := NewTransaction(sender, recipient, value)
 
 	if sender == MINING_SENDER {
-		bc.transactionPool = append(bc.transactionPool, t)
+		bc.mux.Lock()
+		defer bc.mux.Unlock()
+
+		bc.transactionPool[t.ID()] = t
 		return true
 	}
 
@@ -105,7 +144,10 @@ func (bc *Blockchain) AddTransaction(sender string, recipient string, value floa
 		// 	log.Println("Error: not enough balance in a wallet")
 		// 	return false
 		// }
-		bc.transactionPool = append(bc.transactionPool, t)
+		bc.mux.Lock()
+		defer bc.mux.Unlock()
+
+		bc.transactionPool[t.ID()] = t
 		return true
 	} else {
 		log.Println("Error: Verify Transaction")
@@ -127,13 +169,31 @@ func (bc *Blockchain) VerifyTransactionSignature(
 
 // CopyTransactionPool returns a detached copy used during proof-of-work search.
 func (bc *Blockchain) CopyTransactionPool() []*Transaction {
-	transactions := make([]*Transaction, 0)
+	bc.mux.RLock()
+	defer bc.mux.RUnlock()
+
+	return bc.copyTransactionPoolLocked()
+}
+
+// copyTransactionPoolLocked copies pending transactions while the mutex is already held.
+func (bc *Blockchain) copyTransactionPoolLocked() []*Transaction {
+	transactions := make([]*Transaction, 0, len(bc.transactionPool))
 	for _, t := range bc.transactionPool {
 		transactions = append(transactions,
 			NewTransaction(t.senderBlockchainAddress,
 				t.recipientBlockchainAddress,
 				t.value))
 	}
+	return transactions
+}
+
+// transactionPoolSnapshotLocked returns pending transactions without copying their values.
+func (bc *Blockchain) transactionPoolSnapshotLocked() []*Transaction {
+	transactions := make([]*Transaction, 0, len(bc.transactionPool))
+	for _, tx := range bc.transactionPool {
+		transactions = append(transactions, tx)
+	}
+
 	return transactions
 }
 
@@ -166,10 +226,17 @@ func (bc *Blockchain) Mining() bool {
 		return false
 	}
 
-	bc.AddTransaction(MINING_SENDER, bc.blockchainAddres, MINING_REWARD, nil, nil)
-	nonce := bc.ProofOfWork()
-	previousHash := bc.LastBlock().Hash()
-	bc.CreateBlock(nonce, previousHash)
+	rewardTx := NewTransaction(MINING_SENDER, bc.blockchainAddres, MINING_REWARD)
+	bc.transactionPool[rewardTx.ID()] = rewardTx
+
+	transactions := bc.copyTransactionPoolLocked()
+	previousHash := bc.chain[len(bc.chain)-1].Hash()
+	nonce := 0
+	for !bc.ValidProof(nonce, previousHash, transactions, MINING_DIFFICULTY) {
+		nonce += 1
+	}
+
+	bc.createBlockLocked(nonce, previousHash)
 	log.Println("action=mining, status=success")
 	return true
 }
@@ -182,6 +249,9 @@ func (bc *Blockchain) StartMining() {
 
 // CalculateTotalAmount computes a wallet balance by scanning all chain transactions.
 func (bc *Blockchain) CalculateTotalAmount(blockchainAddress string) float32 {
+	bc.mux.RLock()
+	defer bc.mux.RUnlock()
+
 	var totalAmount float32 = 0.0
 	for _, b := range bc.chain {
 		for _, t := range b.transactions {

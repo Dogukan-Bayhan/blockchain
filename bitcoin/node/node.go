@@ -14,7 +14,7 @@ type Node struct {
 	Network *network.Manager
 	Chain   *block.Blockchain
 
-	seenTx map[string]time.Time
+	seenTx  map[string]time.Time
 	knownTx map[string]block.TransactionRequest
 
 	mu sync.RWMutex

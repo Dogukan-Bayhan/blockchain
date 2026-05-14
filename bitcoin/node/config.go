@@ -12,8 +12,8 @@ type Config struct {
 	NetworkID       string
 	ProtocolVersion int
 	UserAgent       string
-	enableMining    string
+	EnableMining    string
 	ReadTimeout     time.Duration
-	WriteTimeout 	time.Duration
+	WriteTimeout    time.Duration
 	MessageMaxBytes int
 }
